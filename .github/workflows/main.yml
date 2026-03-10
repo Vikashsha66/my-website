@@ -1,0 +1,25 @@
+name: CI WORKFLOW
+on:
+  push:
+     branches: ["main"]
+  pull_request: 
+     branches: ["main"]
+
+jobs:
+   build:
+      runs-on: ubuntu-latest
+
+      steps:
+         - name: checkout repository
+           uses: actions/checkout@v4
+
+         - name: Install Nginx
+           run: |
+             sudo apt update
+             sudo apt install nginx -y
+             
+         - name: Check nginx version
+           run: nginx -v
+         - name: Test Nginx version
+           run: sudo nginx -t
+         
