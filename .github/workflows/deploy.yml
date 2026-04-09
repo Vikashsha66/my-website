@@ -6,13 +6,15 @@ on:
     
 job:
   run-on: ubuntu-latest
+
+  steps:
   
-  - name: code checkout
-     uses: action/checkout@v4
+    - name: code checkout
+      uses: action/checkout@v4
      
-  - name: copy file to server
-    uses: appleboy/scp-action@v0.1.7
-    with:
-      source: "."
-      target: "var/www/html"
+    - name: copy file to server
+      uses: appleboy/scp-action@v0.1.7
+      with:
+       source: "."
+       target: "var/www/html"
     
