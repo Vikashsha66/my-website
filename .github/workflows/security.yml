@@ -1,0 +1,248 @@
+
+name: FBSPL PR Security Checks
+
+on:
+  pull_request:
+    branches: [dev, uat, prod]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [dev, uat, prod]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 1. Secret scanning
+  gitleaks:
+    name: Gitleaks Secret Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 2. Static application security testing (SAST)
+  codeql:
+    name: CodeQL SAST
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ vars.CODEQL_LANGUAGES || 'javascript-typescript' }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze code
+        uses: github/codeql-action/analyze@v3
+
+  # 3. Review dependency changes in pull requests
+  dependency-review:
+    name: Dependency Review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check dependency changes
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  # 4. Node.js dependency, lint, test and build checks
+  node-security:
+    name: Node.js Security and Quality
+    runs-on: ubuntu-latest
+    if: hashFiles('package.json') != ''
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        if: hashFiles('pnpm-lock.yaml') != ''
+        uses: pnpm/action-setup@v4
+        with:
+          version: '10.32.1'
+
+      - name: Install and audit pnpm dependencies
+        if: hashFiles('pnpm-lock.yaml') != ''
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm audit --audit-level high
+
+      - name: Install and audit npm dependencies
+        if: hashFiles('package-lock.json') != ''
+        run: |
+          set -euo pipefail
+          npm ci
+          npm audit --audit-level=high
+
+      - name: Fail if no supported lockfile exists
+        if: hashFiles('pnpm-lock.yaml') == '' && hashFiles('package-lock.json') == ''
+        run: |
+          echo "Commit pnpm-lock.yaml or package-lock.json."
+          exit 1
+
+      - name: Run lint
+        run: |
+          if node -e "process.exit(require('./package.json').scripts?.lint ? 0 : 1)"; then
+            if [ -f pnpm-lock.yaml ]; then pnpm lint; else npm run lint; fi
+          else
+            echo "No lint script configured; configure one for this repository."
+          fi
+
+      - name: Run tests
+        run: |
+          if node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then
+            if [ -f pnpm-lock.yaml ]; then pnpm test; else npm test; fi
+          else
+            echo "No test script configured; add tests for stronger coverage."
+          fi
+
+      - name: Build application
+        env:
+          NEXT_PUBLIC_API_BASE_URL: ${{ vars.NEXT_PUBLIC_API_BASE_URL }}
+        run: |
+          if node -e "process.exit(require('./package.json').scripts?.build ? 0 : 1)"; then
+            if [ -f pnpm-lock.yaml ]; then pnpm build; else npm run build; fi
+          else
+            echo "No build script found."
+            exit 1
+          fi
+
+  # 5. Python dependency security and tests
+  python-security:
+    name: Python Security and Quality
+    runs-on: ubuntu-latest
+    if: hashFiles('requirements.txt') != '' || hashFiles('pyproject.toml') != ''
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install project dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          if [ -f pyproject.toml ]; then pip install .; fi
+
+      - name: Audit Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install pip-audit
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt
+          elif [ -f pyproject.toml ]; then
+            pip-audit
+          else
+            echo "No supported dependency manifest found."
+            exit 1
+          fi
+
+      - name: Compile Python files
+        run: python -m compileall -q .
+
+      - name: Run pytest when tests exist
+        run: |
+          if [ -d tests ]; then
+            python -m pip install pytest
+            pytest
+          else
+            echo "No tests directory found; add project tests."
+          fi
+
+  # 6. Filesystem, secrets, dependency and IaC misconfiguration scanning
+  trivy-filesystem:
+    name: Trivy Filesystem and IaC
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Scan repository
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+  # 7. Build and scan a Docker image when a root Dockerfile exists
+  container-security:
+    name: Container Image Security
+    runs-on: ubuntu-latest
+    if: hashFiles('Dockerfile') != ''
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build local image for scanning
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: fbspl-security-scan:${{ github.sha }}
+          load: true
+          push: false
+
+      - name: Scan image vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: fbspl-security-scan:${{ github.sha }}
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
