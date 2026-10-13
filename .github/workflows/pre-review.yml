@@ -1,17 +1,17 @@
+
 name: PR Code Review Checks
 
 on:
-  pull_request:
+  push:
     branches:
       - main
-      
 
 permissions:
   contents: read
   security-events: write
 
 concurrency:
-  group: pr-review-${{ github.event.pull_request.number }}
+  group: code-review-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
