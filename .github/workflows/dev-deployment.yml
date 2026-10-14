@@ -1,0 +1,51 @@
+
+name: DEV Deployment
+
+on:
+  workflow_run:
+    workflows: ["Security Checks"]
+    types: [completed]
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'dev'
+    runs-on: ubuntu-latest
+    environment: development
+
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.DOCKERHUB_REPOSITORY }}
+          IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DEPLOY_PATH: ${{ secrets.DEV_DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.DEV_EC2_HOST }}
+          username: ${{ secrets.DEV_EC2_USER }}
+          key: ${{ secrets.DEV_EC2_SSH_KEY }}
+          envs: IMAGE,IMAGE_TAG,DH_USER,DH_TOKEN,DEPLOY_PATH
+          script: |
+            set -eu
+            cd "$DEPLOY_PATH"
+
+            printf '%s' "$DH_TOKEN" |
+              docker login -u "$DH_USER" --password-stdin
+
+            export IMAGE_TAG
+            docker compose pull
+            docker compose up -d
+
+            # Confirm containers remain running.
+            docker compose ps
+            sleep 10
+            docker compose ps --status running
+
+            docker logout
